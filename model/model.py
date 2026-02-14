@@ -88,5 +88,3 @@ class RMSNorm(nn.Module):
 # forward()方法
     def forward(self,x):
         return self.weight * self._norm(x.float()).type_as(x)
-
-print("测试")
