@@ -39,8 +39,8 @@ t2 = torch.tensor([[[13,14,15],[16,17,18]],[[19,20,21],[22,23,24]]])
 # print(result2.shape) # [2, 4, 3]
 
 #5. unsqueeze
-t = torch.tensor([1,2,3])
+t = torch.tensor([[1,2,3]])
 print(t.shape)
-result = t.unsqueeze(0)
+result = t.unsqueeze(1)
 print(result)
 print(result.shape)
