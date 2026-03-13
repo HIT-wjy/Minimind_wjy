@@ -167,3 +167,60 @@ def apply_rotary_pos_emb(q, k,cos,sin,position_ids = None,unsqueeze_dim = 1):
         k * cos.unsqueeze(unsqueeze_dim)
     ) + (rotate_half(k) * sin.unsqueeze(unsqueeze_dim))
     return q_embed, k_embed
+
+
+
+# GQA需要重复使用KV，编写一个函数来处理重复
+def repeat_kv(x:torch.Tensor,n_rep:int)->torch.Tensor:
+    bs,slen,num_key_value_heads,head_dim = x.shape
+    if n_rep == 1:
+        return x
+    
+    return (
+        x[:,:,:,None,:]
+        .expand(bs,slen,num_key_value_heads,n_rep,head_dim)
+        .reshape(bs,slen,num_key_value_heads*n_rep,head_dim)
+    )
+
+class Attention(nn.Module):
+    def __init__(self,args:MokioMindConfig):
+        super().__init__()
+
+        # 处理GQA：如果没有指定kv头数，则使用与query相同的头数
+        self.num_key_value_heads = args.num_attention_heads if args.num_key_value_heads is None else args.num_key_value_heads
+
+        # assert语句：断言检查，如果条件为False则抛出AssertionError
+        # 确保query头数能被kv头数整除（GQA的基本要求）
+        assert args.num_attention_heads % self.num_key_value_heads == 0
+        "num_attention_heads must be divisible by num_key_value_heads"
+
+
+        self.n_local_heads = args.num_attention_heads          # query头数
+        self.n_local_kv_heads = self.num_key_value_heads       # key-value头数
+        self.n_rep = self.n_local_heads // self.n_local_kv_heads  # 每个kv头需要重复的次数
+        self.head_dim = args.hidden_size // args.num_attention_heads  # 每个头的维度
+
+        # 定义线性层，将输入投影到query、key、value空间
+        self.q_proj = nn.Linear(args.hidden_size, args.num_attention_heads * self.head_dim, bias=False)     # Query投影
+        self.k_proj = nn.Linear(args.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)     # Key投影
+        self.v_proj = nn.Linear(args.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)     # Value投影
+        self.o_proj = nn.Linear(args.num_attention_heads * self.head_dim, args.hidden_size, bias=False)     # 输出投影
+
+        # Dropout层用于正则化
+        self.attn_dropout = nn.Dropout(args.dropout)    # 注意力权重dropout
+        self.resid_dropout = nn.Dropout(args.dropout)   # 残差连接dropout
+        self.dropout = args.dropout                      # 保存dropout率
+
+        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention') and args.flash_attn
+
+
+        print("2026/3/13")
+
+
+
+
+
+
+
+
+
