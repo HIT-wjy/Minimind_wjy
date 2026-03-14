@@ -1,4 +1,8 @@
 from transformers import PretrainedConfig
+from typing import Optional,Tuple
+import math
+from torch.nn import functional as F
+
 
 
 class MokioMindConfig(PretrainedConfig):
@@ -95,13 +99,14 @@ def precompute_feqs_cis(dim: int, end: int = int(32 * 1024), rope_base: float = 
     #初始化RoPE频率
     #attn_factor温差系数
     freqs, attn_factor = 1.0 / (rope_base ** (torch.arange(0,dim,2)[:(dim // 2)].float() / dim)), 1.0#[:(dim // 2)]用于确保长度是dim // 2
-    if rope_scaling is not None:
-        orig_max,factor,beta_fast,beta_slow = (
-            rope_scaling["original_max_position_embeddings"] # 就是L，训练最大长度,2048
-            rope_scaling["factor"]   #16
-            rope_scaling["beta_fast"] #4
-            rope_scaling["beta_slow"] #1
-        )
+    orig_max, factor, beta_fast, beta_slow, attn_factor = (
+        rope_scaling.get("original_max_position_embeddings", 2048),
+        rope_scaling.get("factor", 16),
+        rope_scaling.get("beta_fast", 32.0),
+        rope_scaling.get("beta_slow", 1.0),
+        rope_scaling.get("attention_factor", 1.0),
+    )
+
     
     #推断的长度大于训练长度，使用缩放
     if end > orig_max:
@@ -211,10 +216,78 @@ class Attention(nn.Module):
         self.resid_dropout = nn.Dropout(args.dropout)   # 残差连接dropout
         self.dropout = args.dropout                      # 保存dropout率
 
+        #是否启用flashattention
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention') and args.flash_attn
+    def forward(self,
+                x:torch.Tensor,
+                position_embedding:Tuple[torch.Tensor,torch.Tensor],
+                past_key_value:Optional[Tuple[torch.Tensor,torch.Tensor]] = None,
+                use_cache = False,
+                attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        
+        #投影，计算q,k,v
+        # x: [batch_size, seq_len, hidden]
+        bsz,seq_len,_ = x.shape
+        xq,xk,xv = self.q_proj(x), self.k_proj(x), self.v_proj(x)
+        #把输入拆分成多个头，用view
+        # q: [bsz, seq_len, n_local_heads, head_dim]
+        # k/v: [bsz, seq_len, n_local_kv_heads, head_dim]
+        xq = xq.view(bsz, seq_len, self.n_local_heads, self.head_dim)
+        xk = xk.view(bsz, seq_len, self.n_local_kv_heads, self.head_dim)
+        xv = xv.view(bsz, seq_len, self.n_local_kv_heads, self.head_dim) 
+        
+        #q和k，使用RoPE
+        cos,sin = position_embedding
+        # 只取当前序列长度的前缀（用于inference时从start_pos开始）
+        xq, xk = apply_rotary_pos_emb(xq, xk, cos[:seq_len], sin[:seq_len])
+        #对于K和V，使用repeat_kv（注意KV Cache）
+        if past_key_value is not None:
+            xk = torch.cat([past_key_value[0],xk],dim=1)
+            xv = torch.cat([past_key_value[1],xv],dim=1)
+        past_kv=(xk,xv) if use_cache else None
 
+        xq,xk,xv=(
+            xq.transpose(1,2),
+            repeat_kv(xk,self.n_rep).transpose(1,2),
+            repeat_kv(xv,self.n_rep).transpose(1,2),
+        )
+        # 进行Attention计算，q@k^T /  sqrt(d)
+        if self.flash and seq_len > 1 and (attention_mask is None or torch.all(attention_mask == 1)):
+            # 如果没有显式的attention_mask，直接传None让底层高效实现
+            attn_mask = None if attention_mask is None else attention_mask.view(bsz, 1, 1, -1).expand(bsz, self.n_local_heads, seq_len, -1).bool()
+            # F.scaled_dot_product_attention是PyTorch在新版本中提供的高效实现
+            output = F.scaled_dot_product_attention(
+                xq, xk, xv,
+                attn_mask=attn_mask,
+                dropout_p=self.dropout if self.training else 0.0,
+                is_causal=True  # 自回归（因果）注意力
+            )
+        else:
+            # 标准实现：scores = Q @ K^T / sqrt(d)
+            scores = (xq@xk.transpose(-2,-1)/math.sqrt(self.head_dim))
+            # causal mask: 上三角（对角线以上）置为 -inf，防止看到未来信息
+            causal_mask = torch.triu(torch.full((seq_len, seq_len), float("-inf"), device=scores.device), diagonal=1)
+            scores = scores + causal_mask.unsqueeze(0).unsqueeze(0)  # 扩展batch和head维度
 
-        print("2026/3/13")
+            # 如果有attention_mask(0/1)，将其扩展后转为 -1e9 的加性mask（掩掉pad位置）
+            if attention_mask is not None:
+                extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
+                extended_attention_mask = (1.0 - extended_attention_mask) * -1e9
+                scores = scores + extended_attention_mask
+        
+            scores = F.softmax(scores.float(),dim=-1).type_as(xq)
+            scores = self.attn_dropout(scores)
+            output = scores@xv
+        
+        # 最后拼接头，输出投影，返回
+        ## [bsz, seq_len, hidden]
+        output = output.transpose(1,2).reshape(bsz, seq_len, -1)
+        output = self.o_proj(output)
+        output = self.resid_dropout(output)
+        return output, past_kv
+        
+        
+        
 
 
 

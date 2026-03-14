@@ -32,24 +32,28 @@ import torch.nn as nn
 # t = t.transpose(1,2)#交换1,2维度
 # print(t)#[2,2,3]
 
-# #(5)triu 生成下对角矩阵
-# x = torch.Tensor([[1,2,3],[4,5,6],[7,8,9]])
-# # x = torch.triu(x) #生成上三角矩阵
+#(5)triu 生成上三角矩阵
+x = torch.Tensor([[1,2,3],[4,5,6],[7,8,9]])
+# x = torch.triu(x) #生成上三角矩阵
 # print(torch.triu(x))
 # print(torch.triu(x,diagonal=1)) 
+print(torch.full((3, 3),float("1")))
+causal_mask = torch.triu(torch.full((3, 3), float("-inf")), diagonal=1)
+causal_mask=causal_mask.unsqueeze(0).unsqueeze(0)
+print(causal_mask)
+print(causal_mask.shape) #[1,1,3,3]
+
+# #(6)reshape 改变张量形状
+# x = torch.Tensor([1,2,3,4,5,6])
+# y = torch.reshape(x,(2,3))
+# print(y)
+
+# #使用-1自动推断
+# z = torch.reshape(x,(3,-1)) 
+# print(z)
+
+# # err = torch.reshape(x,(4,-1)) #不兼容的形状会报错
+# # print(err)
 
 
-#(6)reshape 改变张量形状
-x = torch.Tensor([1,2,3,4,5,6])
-y = torch.reshape(x,(2,3))
-print(y)
-
-#使用-1自动推断
-z = torch.reshape(x,(3,-1)) 
-print(z)
-
-# err = torch.reshape(x,(4,-1)) #不兼容的形状会报错
-# print(err)
-
-
-print(hasattr(torch.nn.functional, 'scaled_dot_product_attention'))#True 支持flashAttention
+# print(hasattr(torch.nn.functional, 'scaled_dot_product_attention'))#True 支持flashAttention
