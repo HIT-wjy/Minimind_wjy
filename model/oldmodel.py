@@ -1,8 +1,13 @@
+
+import torch
+import torch.nn as nn 
 from transformers import PretrainedConfig
-from typing import Optional,Tuple
+from typing import Optional,Tuple,List,Union
 import math
 from torch.nn import functional as F
-
+from transformers.activations import ACT2FN
+from transformers import PreTrainedModel, GenerationMixin
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 
 class MokioMindConfig(PretrainedConfig):
@@ -74,8 +79,6 @@ class MokioMindConfig(PretrainedConfig):
             else None
         )
 
-import torch
-import torch.nn as nn 
 #RMSNorm是一层，继承nn.Module类
 class RMSNorm(nn.Module):
 
@@ -88,7 +91,7 @@ class RMSNorm(nn.Module):
 # _norm
     def _norm(self,x):
         #mean(-1) - 沿最后一个维度求平均
-        return torch.rsqrt(x.pow(2).mean(-1,keepdim=True) + self.eps) * x
+        return x * torch.rsqrt(x.pow(2).mean(-1,keepdim=True) + self.eps)
 # forward()方法
     def forward(self,x):
         return self.weight * self._norm(x.float()).type_as(x)
@@ -110,28 +113,33 @@ def precompute_feqs_cis(dim: int, end: int = int(32 * 1024), rope_base: float = 
     
     #推断的长度大于训练长度，使用缩放
     if end > orig_max:
-        #波长b到i的映射
-        # inv_dim是一个函数 
-        inv_dim = lambda b: (dim * math.log(orig_max / (b * 2 * math.pi))) / (2 * math.log(rope_base))
-        
-        #划分高低维度
-        # low：不需要缩放的高频部分（）
-        # high：需要缩放的高频部分
-        low = max(math.floor(inv_dim(beta_fast)), 0)
-        high = min(math.ceil(inv_dim(beta_slow)), dim // 2 - 1)
+        # 3. 使用前文推导的公式，定义波长比例 b 到维度索引 i 的映射函数
+        inv_dim = lambda b: (dim * math.log(orig_max / (b * 2 * math.pi))) / (
+            2 * math.log(rope_base)
+        )
 
-        #计算缩放因子
-        # low 之前，ramp为0。在high之后，ramp为1.在low和high之间，ramp先行过度
+        # 4. 计算高频区和低频区的维度切分点
+        # low: 不需要缩放的高频部分的最高索引
+        # high: 需要完全缩放的低频部分的最低索引
+        low, high = (
+            max(math.floor(inv_dim(beta_fast)), 0),
+            min(math.ceil(inv_dim(beta_slow)), dim // 2 - 1),
+        )
+
+        # 5. 计算混合因子 γ (Ramp)
+        # 在 low 之前，ramp 为 0；在 high 之后，ramp 为 1；在 low 和 high 之间，线性过渡。
+        # clamp 函数限制了数值只能在 [0, 1] 之间。
         ramp = torch.clamp(
-            (torch.arange(dim // 2, device=freqs.device).float() - low) 
-            / max(high - low, 0.001), 
-            0, 
+            (torch.arange(dim // 2, device=freqs.device).float() - low)
+            / max(high - low, 0.001),
+            0,
             1,
         )
 
-        #当ramp=0时，系数为1，freqs不变
-        #当ramp=1时，系数为1/factor,对freqs进行线性插值缩放
-        #ramp在0-1之间时，freqs平滑过度
+        # 6. 频率融合公式：f'(i) = f(i) * ((1-γ) + γ/s)
+        # 当 ramp=0 时（高频）：系数为 1，保持原频率不变。
+        # 当 ramp=1 时（低频）：系数为 1/factor，即对频率进行线性插值缩放。
+        # ramp在0-1之间时：平滑过渡。
         freqs = freqs * (1 - ramp + ramp / factor)
     
     #根据end，生成位置索引t
@@ -192,7 +200,11 @@ class Attention(nn.Module):
         super().__init__()
 
         # 处理GQA：如果没有指定kv头数，则使用与query相同的头数
-        self.num_key_value_heads = args.num_attention_heads if args.num_key_value_heads is None else args.num_key_value_heads
+        self.num_key_value_heads = (
+            args.num_attention_heads 
+            if args.num_key_value_heads is None 
+            else args.num_key_value_heads
+        )
 
         # assert语句：断言检查，如果条件为False则抛出AssertionError
         # 确保query头数能被kv头数整除（GQA的基本要求）
@@ -220,7 +232,7 @@ class Attention(nn.Module):
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention') and args.flash_attn
     def forward(self,
                 x:torch.Tensor,
-                position_embedding:Tuple[torch.Tensor,torch.Tensor],
+                position_embeddings:Tuple[torch.Tensor,torch.Tensor],
                 past_key_value:Optional[Tuple[torch.Tensor,torch.Tensor]] = None,
                 use_cache = False,
                 attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -237,7 +249,7 @@ class Attention(nn.Module):
         xv = xv.view(bsz, seq_len, self.n_local_kv_heads, self.head_dim) 
         
         #q和k，使用RoPE
-        cos,sin = position_embedding
+        cos,sin = position_embeddings
         # 只取当前序列长度的前缀（用于inference时从start_pos开始）
         xq, xk = apply_rotary_pos_emb(xq, xk, cos[:seq_len], sin[:seq_len])
         #对于K和V，使用repeat_kv（注意KV Cache）
@@ -288,6 +300,232 @@ class Attention(nn.Module):
         
         
         
+class FeedForward(nn.Module):
+    #初始化
+    
+    #升维
+    #降维
+    #门控
+    #dropout
+    #激活函数
+
+
+    # SwiGLU类似于Gated Linear Unit变体：act(gate(x)) * up(x)
+        # gate_proj: hidden -> intermediate (用于计算gate部分)
+        # up_proj: hidden -> intermediate (用于被gate的部分)
+        # down_proj: intermediate -> hidden (用于投影回hidden维度)
+    def __init__(self, args:MokioMindConfig):
+        super().__init__()
+        if args.intermediate_size is None:
+            intermediate_size = int(8 * args.hidden_size/3)
+            args.intermediate_size=64*((intermediate_size+64-1)//64)
+
+        self.up_proj = nn.Linear(args.hidden_size, args.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(args.intermediate_size, args.hidden_size, bias=False)
+        self.gate_proj = nn.Linear(args.hidden_size, args.intermediate_size, bias=False)
+        self.dropout = nn.Dropout(args.dropout)
+        self.act_fn  = ACT2FN[args.hidden_act]
+
+    def forward(self,x):
+        gated = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
+        return self.dropout(
+            self.down_proj(gated)
+        )
+
+class MokioMindBlock(nn.Module):
+    def __init__(self,layer_id:int,config:MokioMindConfig):
+        super().__init__()
+        self.num_attention_heads = config.num_attention_heads
+        self.hidden_size = config.hidden_size
+        self.head_dim = self.hidden_size // self.num_attention_heads    
+        self.self_attn = Attention(config)
+
+        self.layer_id = layer_id
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.mlp = FeedForward(config)
+
+    def forward(self,hidden_states,position_embeddings,past_key_value=None,use_cache = False,attention_mask=None):
+        residual = hidden_states
+        hidden_states,present_key_value = self.self_attn(
+            self.input_layernorm(hidden_states),
+            position_embeddings,
+            past_key_value=past_key_value,
+            use_cache=use_cache,
+            attention_mask=attention_mask,
+        )
+        hidden_states = residual + hidden_states
+        hidden_states = hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
+        return hidden_states,present_key_value
+
+
+class MokioMindModule(nn.Module):
+    def __init__(self,config:MokioMindConfig):
+        super().__init__()
+        self.config = config
+        self.vocab_size,self.num_hidden_layer(
+            config.vocab_size,
+            config.num_hidden_layers,
+        )
+
+        #id->tensor
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
+        
+        self.dropout = nn.Dropout(config.dropout)
+        #k个block
+        self.layers = nn.ModuleList(
+            [MokioMindBlock(i,config) for i in range(config.num_hidden_layers)]
+        )
+
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+        #  RoPE预计算
+        freqs_cos, freqs_sin = precompute_feqs_cis(
+            dim = config.hidden_size // config.num_attention_heads,
+            end=config.max_position_embeddings,
+            rope_base=config.rope_theta,
+            rope_scaling=config.rope_scaling,
+        )
+
+        self.register_buffer("freqs_cos", freqs_cos, persistent=False)
+        self.register_buffer("freqs_sin", freqs_sin, persistent=False)
+
+    def forward(self,
+                input_ids:Optional[torch.Tensor] = None,
+                attention_mask: Optional[torch.Tensor] = None,
+                past_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
+                use_cache: bool = False,
+                **kwargs,
+                ):
+        batch_size, seq_len = input_ids.shape
+        if hasattr(past_key_values,"layers"):
+            past_key_values = None
+        
+        past_key_values=past_key_values or [None]*len(self.layers)
+
+        start_pos = (
+            past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
+        )
+
+        hidden_states = self.dropout(self.embed_tokens(input_ids))
+
+        position_embeddings = (
+            self.freqs_cos[start_pos:start_pos + seq_len],
+            self.freqs_sin[start_pos:start_pos + seq_len]
+        )
+
+        presents = []
+
+        for layer_idx,(layer,past_key_value) in enumerate(zip(self.layers,past_key_values)):
+            hidden_states,present_key_value = layer(
+                hidden_states,
+                position_embeddings,
+                past_key_value=past_key_value,
+                use_cache=use_cache,
+                attention_mask=attention_mask,
+            )
+            presents.append(present_key_value)
+
+        hidden_states = self.norm(hidden_states)
+
+        return hidden_states,presents
+    
+class MokioMindForCausalLM(PreTrainedModel, GenerationMixin):
+    config_class = MokioMindConfig
+
+    def __inint__(self,config:MokioMindConfig):
+
+        super().__init__(config)
+
+        self.model = MokioMindModule(config)
+
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        #权重共享
+        #输出层的权重和嵌入层的权重共享，节省参数并提升性能
+        self.model.embed_tokens.weight = self.lm_head.weight
+
+        
+    
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
+        use_cache: bool = False,
+        logits_to_keep: Union[int, torch.Tensor] = 0,
+        **args,
+    ):
+        hidden_states,past_key_values=self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            **args,
+        )
+        
+        #logits_to_keep是一个整数，表示保留最后n个token的logits
+        #生成的时候只需要最后的Logits来预测在一个token
+        slice_indices = (slice(-logits_to_keep,None)) if isinstance(logits_to_keep,int) else logits_to_keep
+        logits = self.lm_head(hidden_states[:,slice_indices,:])
+
+
+        output = CausalLMOutputWithPast(
+            logits=logits,
+            past_key_values=past_key_values,
+            hidden_states=hidden_states,
+        )
+        return output
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

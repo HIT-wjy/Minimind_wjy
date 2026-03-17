@@ -37,11 +37,11 @@ x = torch.Tensor([[1,2,3],[4,5,6],[7,8,9]])
 # x = torch.triu(x) #生成上三角矩阵
 # print(torch.triu(x))
 # print(torch.triu(x,diagonal=1)) 
-print(torch.full((3, 3),float("1")))
-causal_mask = torch.triu(torch.full((3, 3), float("-inf")), diagonal=1)
-causal_mask=causal_mask.unsqueeze(0).unsqueeze(0)
-print(causal_mask)
-print(causal_mask.shape) #[1,1,3,3]
+# print(torch.full((3, 3),float("1")))
+# causal_mask = torch.triu(torch.full((3, 3), float("-inf")), diagonal=1)
+# causal_mask=causal_mask.unsqueeze(0).unsqueeze(0)
+# print(causal_mask)
+# print(causal_mask.shape) #[1,1,3,3]
 
 # #(6)reshape 改变张量形状
 # x = torch.Tensor([1,2,3,4,5,6])
@@ -57,3 +57,9 @@ print(causal_mask.shape) #[1,1,3,3]
 
 
 # print(hasattr(torch.nn.functional, 'scaled_dot_product_attention'))#True 支持flashAttention
+
+name = 'abc'
+loss = 0.99
+acc = 0.97
+print(f"loss:{loss:.2f},acc:{acc:.4f}")
+print("loss:{:.2f},acc:{:.3f}".format(loss,acc))

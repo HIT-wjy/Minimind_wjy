@@ -1,0 +1,4 @@
+checkpoints/
+*.pth
+dataset/pretrain_hq.jsonl
+out/
