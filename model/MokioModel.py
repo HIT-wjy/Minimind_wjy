@@ -323,30 +323,38 @@ class FeedForward(nn.Module):
 
 class MoEGate(nn.Module):
     def __init__(self, config: MokioMindConfig):
+        #初始化
         super().__init__()
         self.config = config
         self.top_k = config.num_experts_per_tok
         self.n_routed_experts = config.n_routed_experts
 
-        self.scoring_func = config.scoring_func
-        self.alpha = config.aux_loss_alpha
-        self.seq_aux = config.seq_aux
+        #打分函数选择
+        self.scoring_func = config.scoring_func#softmax
+        self.alpha = config.aux_loss_alpha#用于控制辅助损失的权重，0.01
+        self.seq_aux = config.seq_aux#决定使用序列级别还是批次级别
 
         self.norm_topk_prob = config.norm_topk_prob
         self.gating_dim = config.hidden_size
+        #新建权重
         self.weight = nn.Parameter(
             torch.empty((self.n_routed_experts, self.gating_dim))
         )
         self.reset_parameters()
-
+    #凯明初始化
     def reset_parameters(self) -> None:
+        #可以方便的初始化一些合适的参数，更好的训练网络
         init.kaiming_uniform_(self.weight, a=math.sqrt(5))
 
     def forward(self, hidden_states):
+        #moe的时候，只看token值，不关心其位置，所以我们可以合并batch和seq_len维度
         bsz, seq_len, h = hidden_states.shape
         hidden_states = hidden_states.view(-1, h)
+        #linear映射计算出每个token对每个expert的logits
         logits = F.linear(hidden_states, self.weight, None)
 
+        #合并之后，对权重进行线性映射，计算出每个token对各个expert的打分
+        #使用softmax函数，进行打分归一化
         if self.scoring_func == "softmax":
             scores = logits.softmax(dim=-1)
         else:
@@ -356,33 +364,48 @@ class MoEGate(nn.Module):
 
         topk_weight, topk_idx = torch.topk(scores, k=self.top_k, dim=-1, sorted=False)
 
+
         if self.top_k > 1 and self.norm_topk_prob:
             denominator = topk_weight.sum(dim=-1, keepdim=True) + 1e-20
             topk_weight = topk_weight / denominator
 
+        #判断是在训练模式下并且阿尔法大于0，才计算辅助损失
         if self.training and self.alpha > 0.0:
             scores_for_aux = scores
             aux_topk = self.top_k
             topk_idx_for_aux_loss = topk_idx.view(bsz, -1)
             if self.seq_aux:
                 scores_for_seq_aux = scores_for_aux.view(bsz, seq_len, -1)
+                #ce [bsz,n_routed_experts],表示每个专家被选中的次数
                 ce = torch.zeros(
                     bsz, self.n_routed_experts, device=hidden_states.device
                 )
+                #根据topk_idx_for_aux_loss的值，将1累加到ce中的对应位置
+                #
                 ce.scatter_add_(
                     1,
                     topk_idx_for_aux_loss,
                     torch.ones(bsz, seq_len * aux_topk, device=hidden_states.device),
-                ).div_(seq_len * aux_topk / self.n_routed_experts)
+                )
+                #计算每个专家的平均使用率
+                #ce除以总的选择数，得到每个专家的使用比例  
+                ce=ce.div_(seq_len * aux_topk / self.n_routed_experts)#[bsz,n_experts]
+                
+                #计算辅助损失：
+                #专家的使用率*专家的平均分
+                #目的：孤立所有专家获得相似的使用率和分数
                 aux_loss = (ce * scores_for_seq_aux.mean(dim=1)).sum(
                     dim=1
                 ).mean() * self.alpha
-            else:
+            else:#批次级的辅助损失
                 mask_ce = F.one_hot(
                     topk_idx_for_aux_loss.view(-1), num_classes=self.n_routed_experts
                 )
+                #ce:[n_routed_experts]，表示整个batch中每个专家的平均选取率
                 ce = mask_ce.float().mean(0)
+                #平均分
                 Pi = scores_for_aux.mean(0)
+                #标准化的选择率
                 fi = ce * self.n_routed_experts
                 aux_loss = (Pi * fi).sum() * self.alpha
         else:
@@ -398,14 +421,16 @@ class MoEFeedForward(nn.Module):  # ！修正：原MoEFeedForaward拼写错误
         self.experts = nn.ModuleList(
             [FeedForward(config) for _ in range(config.n_routed_experts)]
         )
-        # 门控层
+        # 门控层，Router
         self.gate = MoEGate(config)
         if config.n_shared_experts > 0:
+            #共享专家层
             self.shared_experts = nn.ModuleList(
                 [FeedForward(config) for _ in range(config.n_shared_experts)]
             )
 
     def forward(self, x):
+        #复制输入，以便后续共享专家使用
         identity = x
         orig_shape = x.shape
         bsz, seq_len, h = orig_shape
@@ -443,6 +468,8 @@ class MoEFeedForward(nn.Module):  # ！修正：原MoEFeedForaward拼写错误
             y = self.moe_infer(x, flat_topk_idx, topk_weight.view(-1, 1)).view(
                 *orig_shape
             )
+        
+        #处理共享专家
         if self.config.n_shared_experts > 0:
             for expert in self.shared_experts:
                 y = y + expert(identity)
