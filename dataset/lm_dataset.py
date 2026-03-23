@@ -178,14 +178,14 @@ class SFTDataset(Dataset):
 
         算法逻辑（滑动窗口扫描）：
         1. 初始化全 -100 的 labels，默认所有位置不计算 loss。
-        2. 逐位扫描 input_ids，检测是否匹配 bos_id（assistant 回复起始）。
+        2. 逐位扫描 input_ids，检测是否匹配 bos_id（assistant 回复起始）。一个assostant起始标记
         3. 匹配到 bos_id 后，向后扫描直到找到 eos_id（回复结束）。
         4. 将 [start, end+len(eos_id)) 区间内的 label 设为对应的 input_ids 值，
            即这段 assistant 回复参与 loss 计算。
         5. EOS token 本身也计入 label，让模型学会何时停止生成。
         6. 跳过已处理区间，继续扫描下一段 assistant 回复（支持多轮对话）。
         """
-        labels = [-100] * len(input_ids)
+        labels = [-100] * len(input_ids)#-100是交叉熵损失函数默认忽视的值
         i = 0
         while i < len(input_ids):
             if input_ids[i : i + len(self.bos_id)] == self.bos_id:
@@ -211,7 +211,7 @@ class SFTDataset(Dataset):
         # Step 1：随机决定是否插入 system prompt（数据增强）
         conversations = pre_processing_chat(sample["conversations"])
 
-        # Step 2：用 chat template 渲染完整对话字符串
+        # Step 2：用 chat template 渲染完整对话字符串，把对话转换成文本
         prompt = self.create_chat_prompt(conversations)
 
         # Step 3：清理可能出现的空 <think> 块
@@ -433,6 +433,7 @@ class RLAIFDataset(Dataset):
             tokenize=False,
             add_generation_prompt=True,
         )
+        #加上引导语，让模型生成
         prompt = post_processing_chat(prompt)
         return prompt, answer
 

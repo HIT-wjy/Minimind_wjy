@@ -4,14 +4,13 @@ from torch import optim, nn
 
 # 定义Lora网络结构
 class LoRA(nn.Module):
-    def __init__(self, in_features, out_features, rank):
+    def __init__(self,in_features,out_features,rank):
         super().__init__()
-        self.rank = rank  # LoRA的秩（rank），控制低秩矩阵的大小
-        self.A = nn.Linear(in_features, rank, bias=False)  # 低秩矩阵A
-        self.B = nn.Linear(rank, out_features, bias=False)  # 低秩矩阵B
-        # 矩阵A高斯初始化
-        self.A.weight.data.normal_(mean=0.0, std=0.02)
-        # 矩阵B全0初始化
+        self.rank = rank
+        self.A = nn.Linear(in_features,rank,bias=False)
+        self.B = nn.Linear(rank,out_features,bias=False)
+
+        self.A.weight.data.normal_(mean=0.0,std=0.02)#高斯初始化
         self.B.weight.data.zero_()
 
     def forward(self, x):
@@ -20,24 +19,19 @@ class LoRA(nn.Module):
 
 def apply_lora(model, rank=8):
     device = next(model.parameters()).device
-    for name, module in model.named_modules():
-        if (
-            isinstance(module, nn.Linear)
-            and module.weight.shape[0] == module.weight.shape[1]
-        ):
-            lora = LoRA(module.weight.shape[0], module.weight.shape[1], rank=rank).to(
-                device
-            )
-            setattr(module, "lora", lora)
-            original_forward = module.forward
+    for name,module in model.named_modules():
+        if isinstance(model,nn.Linear) and module.weight.shape[0]==module.weight.shape[1]:
+            lora = LoRA(module.weight.shape[0],module.weight.shape[1],rank=rank).to(device)
+            setattr(module,"lora",lora)
+            original_forward = module.forward  
 
-            # 显式绑定
-            def forward_with_lora(x, layer1=original_forward, layer2=lora):
-                return layer1(x) + layer2(x)
+            def forward_with_lora(x,layer1=original_forward,layer2=lora):
+                return layer1(x)+layer2(x)
 
             module.forward = forward_with_lora
 
 
+#加载权重
 def load_lora(model, path):
     device = next(model.parameters()).device
     state_dict = torch.load(path, map_location=device)
@@ -54,7 +48,7 @@ def load_lora(model, path):
             }
             module.lora.load_state_dict(lora_state)
 
-
+#保存权重
 def save_lora(model, path):
     raw_model = getattr(model, "_orig_mod", model)
     state_dict = {}

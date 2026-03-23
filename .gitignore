@@ -1,4 +1,7 @@
 checkpoints/
 *.pth
 dataset/pretrain_hq.jsonl
+dataset/sft_mini_512.jsonl
+dataset/rlaif-mini.jsonl
+dataset/dpo.jsonl
 out/
